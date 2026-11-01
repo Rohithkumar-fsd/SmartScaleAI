@@ -1,0 +1,136 @@
+# -------------------------------------------------------------
+# 1. Redis Deployment & Service
+# -------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+---
+# -------------------------------------------------------------
+# 2. API Gateway Deployment & Service (Always 1 replica)
+# -------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: smartscale-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: smartscale-api
+  template:
+    metadata:
+      labels:
+        app: smartscale-api
+    spec:
+      containers:
+        - name: api
+          image: smartscaleai:v2
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: REDIS_HOST
+              value: "redis-service"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: WORKER_ENABLED
+              value: "false"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-service
+spec:
+  type: LoadBalancer
+  selector:
+    app: smartscale-api
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+# -------------------------------------------------------------
+# 3. Worker Deployment (Managed & Scaled by KEDA)
+# -------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: smartscale-worker
+spec:
+  replicas: 0 # Starts at 0; KEDA scales this up and down
+  selector:
+    matchLabels:
+      app: smartscale-worker
+  template:
+    metadata:
+      labels:
+        app: smartscale-worker
+    spec:
+      containers:
+        - name: worker
+          image: smartscale-worker:v2
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: REDIS_HOST
+              value: "redis-service"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: WORKER_ENABLED
+              value: "true"
+---
+# -------------------------------------------------------------
+# 4. KEDA ScaledObject (Autoscaler)
+# -------------------------------------------------------------
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-scaler
+spec:
+  scaleTargetRef:
+    name: smartscale-worker
+  minReplicaCount: 0 # Scale to 0 when idle
+  maxReplicaCount: 5 # Cap at 5 pods
+  cooldownPeriod: 30 # Wait 30s of empty queue before scaling to 0
+  pollingInterval: 5 # Check Redis every 5 seconds
+  triggers:
+    - type: redis-streams
+      metadata:
+        address: redis-service.default.svc.cluster.local:6379
+        stream: inference:jobs
+        streamLength: "2"
+        activationStreamLength: "1"
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - type: Pods
+              value: 2
+              periodSeconds: 15

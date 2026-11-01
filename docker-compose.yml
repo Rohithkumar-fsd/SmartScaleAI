@@ -1,0 +1,39 @@
+services:
+  # Container 1: Redis Queue & Storage
+  smartscale-redis:
+    image: redis:7-alpine
+    container_name: smartscale-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - smartscale-redis-data:/data
+    restart: unless-stopped
+
+  # Container 2: API Gateway (Worker loop OFF)
+  smartscale-api:
+    build: .
+    container_name: smartscale-api
+    ports:
+      - "8080:8080"
+    environment:
+      - REDIS_HOST=smartscale-redis
+      - REDIS_PORT=6379
+      - WORKER_ENABLED=false
+    depends_on:
+      - smartscale-redis
+    restart: unless-stopped
+
+  # Container 3: Background Worker (Worker loop ON)
+  smartscale-worker:
+    build: .
+    environment:
+      - REDIS_HOST=smartscale-redis
+      - REDIS_PORT=6379
+      - WORKER_ENABLED=true
+    depends_on:
+      - smartscale-redis
+    restart: unless-stopped
+
+volumes:
+  smartscale-redis-data:
